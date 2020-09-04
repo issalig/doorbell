@@ -119,7 +119,7 @@ void handleDoorbell() {
     timeClient.setTimeOffset(timeOffset); //change it only for text
     String ring_time = timeClient.getFormattedTime();
     timeClient.setTimeOffset(0);
-    String url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&text=TIMBRE🔔" + ring_time;
+    String url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&text=🔔🔔🔔" + ring_time;
     //Serial.println(url);
 
     HTTPClient http;    //direct connection is faster than CTBot library
