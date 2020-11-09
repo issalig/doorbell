@@ -1,53 +1,63 @@
 /*
   Name:		    doorbell.ino
-  Created:	  18/11/2019 Initial version
+  History:	  18/11/2019 Initial version
               10/02/2019 NTP added
               27/08/2020 OTA and updated telegram SHA key
               04/09/2020 web with AJAX and DST functions
+              09/11/2020 ESP32 support
+              
   Author:	    issalig
-  Description: sends a message to telegram when doorbell rings and also on web
+  
+  Description: sends a message to telegram when doorbell rings and also shows it on web
 
               HW
               If connecting to a 220v doorbell just use optocoupler module like this https://es.aliexpress.com/item/32809745991.htm to detect ringing without frying anything.
               Connect signal from optocoupler to D6 (or other pin you like), and 3V3 and GND (Used Wemos D1 mini, others should work too)
 
               SW
-              Upload data directory with ESP8266SketchDataUpload and flash it with USB for the first time. Then, when installed you can use OTA updates.                           
-              
+              Upload data directory with ESP8266SketchDataUpload and flash it with USB for the first time. Then, when installed you can use OTA updates.
+
   Todos:      add wifi scan and/or ble
 
   References: https://tttapa.github.io/ESP8266
               https://github.com/luisllamasbinaburo/ESP8266-Examples
-              
-*/
 
+*/
+#include "credentials.hpp"
+
+#ifdef ESP8266
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WiFi.h>
+#elif ESP32
+#include <HTTPClient.h>
+//#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#endif
 
 #include <NTPClient.h> //install from arduino or get it from https://github.com/arduino-libraries/NTPClient
 #include <WiFiUdp.h>
 
 #include <ArduinoOTA.h>
-#include <ESP8266mDNS.h>
 #include <FS.h>
+#ifdef ESP8266
+#include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
 ESP8266WebServer server(80);       // create a web server on port 80
+#elif ESP32
+#include <SPIFFS.h>
+#include <ESPmDNS.h>
+#include <WebServer.h>
+WebServer server(80);       // create a web server on port 80
+#endif
+
 File fsUploadFile;                                    // a File variable to temporarily store the received file
 
-const char* mdnsName = "doorbell"; // Domain name for the mDNS responder
-const char *OTAName = "doorbell";           // A name and a password for the OTA service
-const char *OTAPassword = "esp8266";
 
-IPAddress ip(192, 168, 2, 206);
+IPAddress ip(192, 168, 2, 215);
 IPAddress gateway(192, 168, 2, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dnsAddr(8, 8, 8, 8);  //google DNS, if you do not have a DNS, use 149.154.167.220 instead api.telegram.org
 
-String ssid  = "x"    ; // REPLACE ssid WITH YOUR WIFI SSID
-String pass  = "x"; // REPLACE pass YOUR WIFI PASSWORD, IF ANY
-
-String token = "x"   ; // REPLACE token WITH YOUR TELEGRAM BOT TOKEN
-int32_t chat_id = 0; // REPLACE chat_id WITH YOUR CHAT ID
 
 int doorbell = 0;
 int ring_idx = 0;
@@ -55,14 +65,20 @@ int ring_idx = 0;
 #define MAX_RINGS 16
 String rings[MAX_RINGS];
 
-
+#ifdef ESP8266
 //https://www.esp8266.com/viewtopic.php?p=54376
 int bell_pin = D6; //D2, D6 and D7 available. Avoid the following pins: D8 is pulled up at boot, D4 wired to led and D0 for sleep mode
+#elif ESP32
+int bell_pin = 5;//D5;
+#endif
 
 //fingerprint is got from Firefox browser. if it changes you must reflash
 // SHA1 Fingerprint for api.telegram.org, expires on 23/5/2022, needs to be updated well before this date
 const uint8_t fingerprint[20] = {0xF2, 0xAD, 0x29, 0x9C, 0x34, 0x48, 0xDD, 0x8D, 0xF4, 0xCF, 0x52, 0x32, 0xF6, 0x57, 0x33, 0x68, 0x2E, 0x81, 0xC1, 0x90};
 //const char fingerprint[] = "F2:AD:29:9C:34:48:DD:8D:F4:CF:52:32:F6:57:33:68:2E:81:C1:90";
+
+//ESP32 needs PEM
+//https://github.com/espressif/arduino-esp32/issues/278
 
 // Define NTP Client to get time
 WiFiUDP ntpUDP;
@@ -122,6 +138,7 @@ void handleDoorbell() {
     String url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&text=TIMBRE🔔" + ring_time;
     //Serial.println(url);
 
+#if ESP8266
     HTTPClient http;    //direct connection is faster than CTBot library
     http.begin(url, fingerprint);     //Specify request destination
     http.addHeader("Content-Type", "text/plain");  //Specify content-type header
@@ -130,6 +147,20 @@ void handleDoorbell() {
     Serial.printf("Return code: %d\n", httpCode);  //Print HTTP return code
     Serial.printf("Payload: %s\n", payload.c_str());    //Print request response payload
     http.end();  //Close connection
+#elif ESP32
+    //https://medium.com/@dfa_31434/doing-ssl-requests-on-esp8266-correctly-c1f60ad46f5e
+    HTTPClient https;
+    if (https.begin(url, ca)) { // HTTPS
+      Serial.printf("[HTTPS] GET...\n");
+      https.addHeader("Content-Type", "text/plain");  //Specify content-type header
+      int httpCode = https.GET(); // start connection and send HTTP header
+      Serial.printf("[Return code: %d\n", httpCode);
+      String payload = https.getString();
+      Serial.printf("Payload: %s\n", payload.c_str());    //Print request response payload
+      https.end();
+    } else
+      Serial.printf("[HTTPS] Unable to connect\n");
+#endif
 
     rings[ring_idx] = timeClient.getEpochTime();
     ring_idx = (ring_idx + 1) % MAX_RINGS;
@@ -150,19 +181,19 @@ void handleDoorbell() {
 #define DAYSOFAYEAR  365UL
 #define SEC20200101  1577750400UL // 2020/01/01 - 1 day (86400s) because the result of the integer division is rounded off
 
-void NTPymd(unsigned long mytime, uint16_t *_date, uint16_t *_month, uint16_t *_year){
+void NTPymd(unsigned long mytime, uint16_t *_date, uint16_t *_month, uint16_t *_year) {
   *_date  = 0;
   *_month = 0;
   *_year  = 0;
   bool        _isLeapYear  = false;
 
-  uint32_t    _days2k = (mytime - SEC20200101)/86400; // distance to today in days
+  uint32_t    _days2k = (mytime - SEC20200101) / 86400; // distance to today in days
   if (_days2k > DAYSOF4YEARS) {         // how many four-year packages + remaining days, from 2050 faster than subtraction on an esp8266 ;)
     *_year = _days2k / DAYSOF4YEARS;
     _days2k = _days2k - *_year * DAYSOF4YEARS;
     *_year *= 4;
   }
-  
+
   if (_days2k > DAYSOFAYEAR + 1) {        //2020 was a leap year, how many years + remaining days
     _days2k--;
     while (_days2k > DAYSOFAYEAR) {       //three times at most
@@ -170,37 +201,73 @@ void NTPymd(unsigned long mytime, uint16_t *_date, uint16_t *_month, uint16_t *_
       *_year++;
     }
   } else _isLeapYear = true;
-  
+
   *_year += 2020;              // + 2020
-  
+
   if (_isLeapYear && _days2k > 60) _days2k--;     // subtract the possible leap day when February passed
-  
-  if  (_days2k > 334) { *_month = 12;  *_date = _days2k - 334;  }    //boring but quick
-  else if (_days2k > 304) { *_month = 11;  *_date = _days2k - 304;  }
-  else if (_days2k > 273) { *_month = 10;  *_date = _days2k - 273;  }
-  else if (_days2k > 243) { *_month = 9; *_date = _days2k - 243;  }
-  else if (_days2k > 212) { *_month = 8; *_date = _days2k - 212;  }
-  else if (_days2k > 181) { *_month = 7; *_date = _days2k - 181;  }
-  else if (_days2k > 151) { *_month = 6; *_date = _days2k - 151;  }
-  else if (_days2k > 120) { *_month = 5; *_date = _days2k - 120;  }
-  else if (_days2k > 90)  { *_month = 4; *_date = _days2k - 90; }
-  else if (_days2k > 59)  { *_month = 3; *_date = _days2k - 59; }
-  else if (_days2k > 31)  { *_month = 2; *_date = _days2k - 31; }
-  else      { *_month = 1; *_date = _days2k;  }
+
+  if  (_days2k > 334) {
+    *_month = 12;   //boring but quick
+    *_date = _days2k - 334;
+  }
+  else if (_days2k > 304) {
+    *_month = 11;
+    *_date = _days2k - 304;
+  }
+  else if (_days2k > 273) {
+    *_month = 10;
+    *_date = _days2k - 273;
+  }
+  else if (_days2k > 243) {
+    *_month = 9;
+    *_date = _days2k - 243;
+  }
+  else if (_days2k > 212) {
+    *_month = 8;
+    *_date = _days2k - 212;
+  }
+  else if (_days2k > 181) {
+    *_month = 7;
+    *_date = _days2k - 181;
+  }
+  else if (_days2k > 151) {
+    *_month = 6;
+    *_date = _days2k - 151;
+  }
+  else if (_days2k > 120) {
+    *_month = 5;
+    *_date = _days2k - 120;
+  }
+  else if (_days2k > 90)  {
+    *_month = 4;
+    *_date = _days2k - 90;
+  }
+  else if (_days2k > 59)  {
+    *_month = 3;
+    *_date = _days2k - 59;
+  }
+  else if (_days2k > 31)  {
+    *_month = 2;
+    *_date = _days2k - 31;
+  }
+  else      {
+    *_month = 1;
+    *_date = _days2k;
+  }
 }
 
 //from adafruit rtclib
 bool isDSTeu(uint8_t tzHours, int y, int m, int d, int h) {
-// European Daylight Savings Time calculation by "jurs" for German Arduino Forum
-// input parameter: tzHours (0=UTC, 1=Europe/Brussels)
-// return value: returns true during Daylight Saving Time, false otherwise
-  if (m<3 || m>10) return false; // no summertime in Jan, Feb, Nov, Dec
-  if (m>3 && m<10) return true; // summertime in Apr, May, Jun, Jul, Aug, Sep
-  return (((m==3)  && (h + 24 * d)>=(1 + tzHours + 24*(31 - (5 * (y) /4 + 4) % 7))) || //spring
-          ((m==10) && (h + 24 * d)< (1 + tzHours + 24*(31 - (5 * (y) /4 + 1) % 7)))); //autumn
+  // European Daylight Savings Time calculation by "jurs" for German Arduino Forum
+  // input parameter: tzHours (0=UTC, 1=Europe/Brussels)
+  // return value: returns true during Daylight Saving Time, false otherwise
+  if (m < 3 || m > 10) return false; // no summertime in Jan, Feb, Nov, Dec
+  if (m > 3 && m < 10) return true; // summertime in Apr, May, Jun, Jul, Aug, Sep
+  return (((m == 3)  && (h + 24 * d) >= (1 + tzHours + 24 * (31 - (5 * (y) / 4 + 4) % 7))) || //spring
+          ((m == 10) && (h + 24 * d) < (1 + tzHours + 24 * (31 - (5 * (y) / 4 + 1) % 7)))); //autumn
 }
 
-
+#if ESP8266
 void startWiFi() { //fixed IP
   //WiFi.mode(WIFI_STA);
   WiFi.config(ip, gateway, subnet, dnsAddr);
@@ -221,6 +288,28 @@ void startWiFi() { //fixed IP
   Serial.println(WiFi.localIP());
   Serial.println(WiFi.macAddress());
 }
+#elif ESP32
+void startWiFi() { //fixed IP
+  //WiFi.mode(WIFI_STA);
+  WiFi.config(ip, gateway, subnet, dnsAddr);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.print("Connected to:\t");
+  Serial.println(ssid);
+
+  // wait for connection
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(200);
+    Serial.print('.');
+  }
+
+  // show IP
+  Serial.println("Connection stablished.");
+  Serial.print("IP address:\t");
+  Serial.println(WiFi.localIP());
+  Serial.println(WiFi.macAddress());
+}
+#endif
 
 void startOTA() { // Start the OTA service
   ArduinoOTA.setHostname(OTAName);
@@ -254,7 +343,7 @@ void startMDNS() { // Start the mDNS responder
   Serial.println(".local");
 }
 
-
+#if ESP8266
 bool isInternalIP(ESP8266WebServer *myserver) {
   IPAddress clientIP = myserver->client().remoteIP();
   IPAddress serverIP = WiFi.localIP();
@@ -271,6 +360,7 @@ bool isInternalIP(ESP8266WebServer *myserver) {
 
   return (clientIP[0] == serverIP[0] && clientIP[1] == serverIP[1]);
 }
+#endif
 
 void initRings() {
   String msg;
@@ -286,12 +376,12 @@ String getRings() {
   int i;
 
   uint16_t day, month, year;
-  NTPymd(timeClient.getEpochTime(),&day, &month, &year);
+  NTPymd(timeClient.getEpochTime(), &day, &month, &year);
   bool dst = isDSTeu(1, year, month, day, timeClient.getHours());
-  timeOffset = dst*3600+utcOffsetInSeconds; //add 1h if dst to the UTC offset
-  
+  timeOffset = dst * 3600 + utcOffsetInSeconds; //add 1h if dst to the UTC offset
+
   //handmade json, if it gets more complex, use ArduinoJson library
-  msg = "{\"id\":\"rings\",\"time\":\"" + String(timeClient.getEpochTime())+"\",\"offset\":"+timeOffset;
+  msg = "{\"id\":\"rings\",\"time\":\"" + String(timeClient.getEpochTime()) + "\",\"offset\":" + timeOffset;
   msg += ", \"vals\":[\"" + rings[0] + "\"" ;
   for (i = 1; i < MAX_RINGS; i++) {
     msg += ",\"" + rings[i] + "\"" ;
@@ -319,7 +409,7 @@ void startServer() { // Start a HTTP server with a file read handler and an uplo
   Serial.println("HTTP server started.");
 }
 
-
+#if ESP8266
 void startSPIFFS() { // Start the SPIFFS and list all contents
   SPIFFS.begin();                             // Start the SPI Flash File System (SPIFFS)
   Serial.println("SPIFFS started. Contents:");
@@ -333,7 +423,25 @@ void startSPIFFS() { // Start the SPIFFS and list all contents
     Serial.printf("\n");
   }
 }
+#elif ESP32
+void startSPIFFS() { // Start the SPIFFS and list all contents
+  SPIFFS.begin();                             // Start the SPI Flash File System (SPIFFS)
+  Serial.println("SPIFFS started. Contents:");
+  {
+    //Dir dir = SPIFFS.openDir("/");
+    File dir = SPIFFS.open("/");
+    File file = dir.openNextFile();
+    while (file) {                      // List the file system contents
+      String fileName = file.name();
+      size_t fileSize = file.size();
+      Serial.printf("\tFS File: %s, size: %s\r\n", fileName.c_str(), formatBytes(fileSize).c_str());
+      file = dir.openNextFile();
+    }
+    Serial.printf("\n");
+  }
+}
 
+#endif
 /*__________________________________________________________SERVER_HANDLERS__________________________________________________________*/
 
 //https://randomnerdtutorials.com/esp8266-web-server-spiffs-nodemcu/
