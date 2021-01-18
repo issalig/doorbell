@@ -11,13 +11,13 @@ function processData(data)
   if (json.id=="rings") parseRings(json);
 }
 
-//Ajax script to get ADC voltage at every 5 Seconds 
  
 setInterval(function() {
-  // Call a function repetatively with 5 Second interval
+  // Call a function every 5 secs
   getData();
 }, 5000); //5000mSeconds update rate
 
+//ajax request
 function getData() {
   var xhttp = new XMLHttpRequest();
   xhttp.onreadystatechange = function() {
@@ -39,8 +39,10 @@ function parseData(json){
     //var dec = moment(parseInt(json.time)*1000);
     //dec.tz('Europe/Brussels').format('ha z');
  
-	document.getElementById("doorbell_time").innerHTML= json.time*1000 +"<br>"+ d.toLocaleTimeString() + " " + d.toLocaleDateString()
+	document.getElementById("doorbell_time").innerHTML= d.toLocaleTimeString() + " " + d.toLocaleDateString();
 
+    d = new Date(parseInt(json.boot_time)*1000);
+    document.getElementById("boot_time").innerHTML= d.toLocaleTimeString() + " " + d.toLocaleDateString();
 
     //clear data if any
     for(var i = table.rows.length - 1; i > 0; i--)

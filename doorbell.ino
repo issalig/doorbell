@@ -5,9 +5,10 @@
               27/08/2020 OTA and updated telegram SHA key
               04/09/2020 web with AJAX and DST functions
               09/11/2020 ESP32 support
-              
+              18/01/2021 Boot time
+
   Author:	    issalig
-  
+
   Description: sends a message to telegram when doorbell rings and also shows it on web
 
               HW
@@ -19,11 +20,15 @@
 
   Todos:      add wifi scan and/or ble
 
-  References: https://tttapa.github.io/ESP8266
-              https://github.com/luisllamasbinaburo/ESP8266-Examples
+  References and some code borrowed from: https://tttapa.github.io/ESP8266
+                                          https://github.com/luisllamasbinaburo/ESP8266-Examples
 
 */
 #include "credentials.hpp"
+
+#if ESP32
+#include "ble.hpp"
+#endif
 
 #ifdef ESP8266
 #include <ESP8266HTTPClient.h>
@@ -53,14 +58,15 @@ WebServer server(80);       // create a web server on port 80
 File fsUploadFile;                                    // a File variable to temporarily store the received file
 
 
-IPAddress ip(192, 168, 2, 215);
+IPAddress ip(192, 168, 2, 205);
 IPAddress gateway(192, 168, 2, 1);
 IPAddress subnet(255, 255, 255, 0);
-IPAddress dnsAddr(8, 8, 8, 8);  //google DNS, if you do not have a DNS, use 149.154.167.220 instead api.telegram.org
+IPAddress dnsAddr(8, 8, 8, 8);  //google DNS, if you do not have a DNS, use 149.154.167.220 instead of api.telegram.org
 
 
 int doorbell = 0;
 int ring_idx = 0;
+long int boot_time;
 
 #define MAX_RINGS 16
 String rings[MAX_RINGS];
@@ -106,12 +112,18 @@ void setup() {
   startMDNS();
   startServer();
 
+#if ESP32
+  //startBLE();
+#endif
+
   doorbell = 0;
   pinMode(bell_pin, INPUT_PULLUP); //if on air pin it will report HIGH
   attachInterrupt(digitalPinToInterrupt(bell_pin), int_doorbell, FALLING);  //1 means NO_RING   0 mean RING
 
   initRings();
   timeClient.begin(); //get NTP time
+  timeClient.update();                        // update time
+  boot_time=timeClient.getEpochTime();
 
 }
 
@@ -135,7 +147,7 @@ void handleDoorbell() {
     timeClient.setTimeOffset(timeOffset); //change it only for text
     String ring_time = timeClient.getFormattedTime();
     timeClient.setTimeOffset(0);
-    String url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&text=🔔🔔🔔" + ring_time;
+    String url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + chat_id + "&text=TIMBRE🔔" + ring_time;
     //Serial.println(url);
 
 #if ESP8266
@@ -148,19 +160,31 @@ void handleDoorbell() {
     Serial.printf("Payload: %s\n", payload.c_str());    //Print request response payload
     http.end();  //Close connection
 #elif ESP32
-    //https://medium.com/@dfa_31434/doing-ssl-requests-on-esp8266-correctly-c1f60ad46f5e
-    HTTPClient https;
-    if (https.begin(url, ca)) { // HTTPS
-      Serial.printf("[HTTPS] GET...\n");
-      https.addHeader("Content-Type", "text/plain");  //Specify content-type header
-      int httpCode = https.GET(); // start connection and send HTTP header
-      Serial.printf("[Return code: %d\n", httpCode);
-      String payload = https.getString();
-      Serial.printf("Payload: %s\n", payload.c_str());    //Print request response payload
-      https.end();
-    } else
-      Serial.printf("[HTTPS] Unable to connect\n");
+    {
+      //https://medium.com/@dfa_31434/doing-ssl-requests-on-esp8266-correctly-c1f60ad46f5e
+      HTTPClient https;
+      if (https.begin(url, ca)) { // HTTPS
+        Serial.printf("[HTTPS] GET...\n");
+        https.addHeader("Content-Type", "text/plain");  //Specify content-type header
+        int httpCode = https.GET(); // start connection and send HTTP header
+        Serial.printf("[Return code: %d\n", httpCode);
+        String payload = https.getString();
+        Serial.printf("Payload: %s\n", payload.c_str());    //Print request response payload
+        https.end();
+
+        //with 1.4.0 CRASHES!!!!
+        //with 1.5.0-rc1 does not CRASH but http returns -1
+        //delay(200);
+        //WiFi.disconnect();
+        //delay(100);
+        //scanBLE();
+        //delay(100);
+        //WiFi.begin(ssid.c_str(), pass.c_str());
+      } else Serial.printf("[HTTPS] Unable to connect\n");
+    }
 #endif
+
+    //scanWifi();
 
     rings[ring_idx] = timeClient.getEpochTime();
     ring_idx = (ring_idx + 1) % MAX_RINGS;
@@ -170,6 +194,8 @@ void handleDoorbell() {
     doorbell = 0; //clear doorbell status
   }
 }
+
+
 
 
 /*__________________________________________________________SETUP_FUNCTIONS__________________________________________________________*/
@@ -382,6 +408,7 @@ String getRings() {
 
   //handmade json, if it gets more complex, use ArduinoJson library
   msg = "{\"id\":\"rings\",\"time\":\"" + String(timeClient.getEpochTime()) + "\",\"offset\":" + timeOffset;
+  msg += ",\"boot_time\":"+String(boot_time);
   msg += ", \"vals\":[\"" + rings[0] + "\"" ;
   for (i = 1; i < MAX_RINGS; i++) {
     msg += ",\"" + rings[i] + "\"" ;
@@ -442,6 +469,49 @@ void startSPIFFS() { // Start the SPIFFS and list all contents
 }
 
 #endif
+
+/*__________________________________________________________SCAN_FUNCTIONS__________________________________________________________*/
+
+//https://blog.podkalicki.com/esp32-wifi-sniffer/
+//scan wifi devices https://www.hackster.io/p99will/esp32-wifi-mac-scanner-sniffer-promiscuous-4c12f4
+
+void scanWifi()  //scan wifi networks
+{
+
+
+  // Set WiFi to station mode and disconnect from an AP if it was previously connected
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  Serial.println("scan start");
+
+  // WiFi.scanNetworks will return the number of networks found
+  int n = WiFi.scanNetworks();
+  Serial.println("scan done");
+  if (n == 0) {
+    Serial.println("no networks found");
+  } else {
+    Serial.print(n);
+    Serial.println(" networks found");
+    for (int i = 0; i < n; ++i) {
+      // Print SSID and RSSI for each network found
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(")");
+      //Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
+      delay(10);
+    }
+  }
+  Serial.println("");
+
+  //connect again
+  startWiFi();
+}
+
 /*__________________________________________________________SERVER_HANDLERS__________________________________________________________*/
 
 //https://randomnerdtutorials.com/esp8266-web-server-spiffs-nodemcu/
